@@ -71,7 +71,7 @@ void SessionManager::ReturnClientSession(ClientSession* client)
 	uint64_t threadId = (mCurrentReturnCount++ % MAX_RIO_THREAD) + 1;
 	CRASH_ASSERT(threadId > 0);
 
-	mOccupiedSessionList.pop_back();
+	mOccupiedSessionList.remove(client);
 
 	mFreeSessionList[threadId].push_back(client);
 }
