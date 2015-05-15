@@ -7,6 +7,8 @@ enum IOType
 	IO_NONE,
 	IO_SEND,
 	IO_RECV,
+	IO_ACCEPT,
+	IO_DISCONNECT
 };
 
 enum DisconnectReason
@@ -22,6 +24,8 @@ enum DisconnectReason
 
 enum RioConfig
 {
+	CK_RIO = 0xC0DE,
+
 	SESSION_BUFFER_SIZE = 65536,
 
 	MAX_RIO_RESULT = 256,
@@ -42,4 +46,27 @@ struct RioIoContext : public RIO_BUF, public ObjectPool<RioIoContext>
 	IOType	mIoType;
 };
 
+struct OverlappedContext
+{
+	OverlappedContext(ClientSession* client, IOType ioType);
 
+	OVERLAPPED		mOverlapped;
+	ClientSession*	mClientSession;
+	IOType			mIoType;
+	WSABUF			mWsaBuf;
+};
+
+struct OverlappedDisconnectContext : public OverlappedContext, public ObjectPool<OverlappedDisconnectContext>
+{
+	OverlappedDisconnectContext(ClientSession* owner, DisconnectReason dr)
+		: OverlappedContext(owner, IO_DISCONNECT), mDisconnectReason(dr)
+	{}
+
+	DisconnectReason mDisconnectReason;
+};
+
+struct OverlappedAcceptContext : public OverlappedContext, public ObjectPool<OverlappedAcceptContext>
+{
+	OverlappedAcceptContext(ClientSession* owner) : OverlappedContext(owner, IO_ACCEPT)
+	{}
+};

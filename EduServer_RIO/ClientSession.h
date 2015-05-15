@@ -1,5 +1,4 @@
 #pragma once
-#include "ObjectPool.h"
 #include "CircularBuffer.h"
 #include "RioContext.h"
 
@@ -11,9 +10,13 @@ public:
 	ClientSession();
 	~ClientSession();
 
-	bool	OnConnect(SOCKET socket, SOCKADDR_IN* addr);
-	bool	IsConnected() const { return mConnected; }
+	bool	IsConnected() const { return !!mConnected; }
 
+	bool	PostAccept();
+	void	AcceptCompletion();
+
+	void	DisconnectRequest(DisconnectReason dr);
+	void	DisconnectCompletion(DisconnectReason dr);
 
 	bool	PostRecv();
 	void	RecvCompletion(DWORD transferred);
@@ -21,12 +24,8 @@ public:
 	bool	PostSend();
 	void	SendCompletion(DWORD transferred);
 	
-	void	Disconnect(DisconnectReason dr);
-	
 	void	AddRef();
 	void	ReleaseRef();
-
-	
 
 private:
 	bool	RioInitialize();
@@ -38,13 +37,11 @@ private:
 	RIO_RQ			mRequestQueue;
 
 private:
-	bool			mConnected ;
-
+	
 	SOCKET			mSocket ;
 	SOCKADDR_IN		mClientAddr ;
 		
-	FastSpinlock	mSessionLock;
-
+	volatile long	mConnected;
 	volatile long	mRefCount;
 
 	friend class SessionManager;

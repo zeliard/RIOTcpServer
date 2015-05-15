@@ -10,11 +10,11 @@ class SessionManager
 public:
 	SessionManager() : mCurrentIssueCount(0), mCurrentReturnCount(0)
 	{}
-	~SessionManager();
+
 
 	bool PrepareSessionPool();
 
-	ClientSession* IssueClientSession();
+	bool AcceptSessions();
 
 	void ReturnClientSession(ClientSession* client);
 
@@ -22,7 +22,6 @@ public:
 private:
 	typedef std::list<ClientSession*> ClientList;
 	ClientList	mFreeSessionList;
-	ClientList	mOccupiedSessionList;
 
 	FastSpinlock mLock;
 

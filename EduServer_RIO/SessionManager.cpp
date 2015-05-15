@@ -7,20 +7,6 @@
 
 SessionManager* GSessionManager = nullptr;
 
-SessionManager::~SessionManager()
-{
-	for (auto it : mOccupiedSessionList)
-	{
-		delete it;
-	}
-
-	for (auto it : mFreeSessionList )
-	{
-		delete it;
-	}
-
-}
-
 bool SessionManager::PrepareSessionPool()
 {
 	for (int j = 0; j < MAX_CLIENT; ++j)
@@ -35,22 +21,25 @@ bool SessionManager::PrepareSessionPool()
 	return true;
 }
 
-ClientSession* SessionManager::IssueClientSession()
+
+bool SessionManager::AcceptSessions()
 {
 	FastSpinlockGuard guard(mLock);
 
+	while (mCurrentIssueCount - mCurrentReturnCount < MAX_CLIENT)
+	{
+		ClientSession* newClient = mFreeSessionList.back();
+		mFreeSessionList.pop_back();
 
+		++mCurrentIssueCount;
 
-	CRASH_ASSERT((mCurrentIssueCount - mCurrentReturnCount) <= MAX_CLIENT);
+		newClient->AddRef(); ///< refcount +1 for issuing 
 
-	ClientSession* newClient = mFreeSessionList.back();
-	mFreeSessionList.pop_back();
+		if (false == newClient->PostAccept())
+			return false;
+	}
 
-	newClient->AddRef();
-
-	mOccupiedSessionList.push_back(newClient);
-
-	return newClient;
+	return true;
 }
 
 
@@ -58,9 +47,7 @@ void SessionManager::ReturnClientSession(ClientSession* client)
 {
 	FastSpinlockGuard guard(mLock);
 
-	CRASH_ASSERT(client->mSocket == NULL && client->mConnected == false && client->mRefCount == 0);
-
-	mOccupiedSessionList.remove(client);
+	CRASH_ASSERT(client->mSocket == NULL && client->mConnected == 0 && client->mRefCount == 0);
 
 	mFreeSessionList.push_back(client);
 }

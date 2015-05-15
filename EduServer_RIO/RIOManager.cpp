@@ -7,7 +7,24 @@
 
 
 RIO_EXTENSION_FUNCTION_TABLE RIOManager::mRioFunctionTable = { 0, };
-RIO_CQ RIOManager::mRioCompletionQueue(0);
+RIO_CQ RIOManager::mRioCompletionQueue(nullptr);
+
+LPFN_DISCONNECTEX RIOManager::mFnDisconnectEx = nullptr;
+LPFN_ACCEPTEX RIOManager::mFnAcceptEx = nullptr;
+char RIOManager::mAcceptBuf[64] = { 0, };
+
+BOOL DisconnectEx(SOCKET hSocket, LPOVERLAPPED lpOverlapped, DWORD dwFlags, DWORD reserved)
+{
+	return RIOManager::mFnDisconnectEx(hSocket, lpOverlapped, dwFlags, reserved);
+}
+
+BOOL AcceptEx(SOCKET sListenSocket, SOCKET sAcceptSocket, PVOID lpOutputBuffer, DWORD dwReceiveDataLength,
+	DWORD dwLocalAddressLength, DWORD dwRemoteAddressLength, LPDWORD lpdwBytesReceived, LPOVERLAPPED lpOverlapped)
+{
+	return RIOManager::mFnAcceptEx(sListenSocket, sAcceptSocket, lpOutputBuffer, dwReceiveDataLength,
+		dwLocalAddressLength, dwRemoteAddressLength, lpdwBytesReceived, lpOverlapped);
+}
+
 
 RIOManager* GRioManager = nullptr;
 
@@ -33,9 +50,20 @@ bool RIOManager::Initialize()
 		return false;
 
 	/// create TCP socket with RIO mode
-	mListenSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_REGISTERED_IO);
+	mListenSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_REGISTERED_IO | WSA_FLAG_OVERLAPPED);
 	if (mListenSocket == INVALID_SOCKET)
 		return false;
+
+	mIocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+	if (NULL == mIocp)
+		return false;
+
+	HANDLE handle = CreateIoCompletionPort((HANDLE)mListenSocket, mIocp, 0, 0);
+	if (handle != mIocp)
+	{
+		printf_s("[DEBUG] listen socket IOCP register error: %d\n", GetLastError());
+		return false;
+	}
 
 	int opt = 1;
 	setsockopt(mListenSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(int));
@@ -50,6 +78,18 @@ bool RIOManager::Initialize()
 	if (SOCKET_ERROR == bind(mListenSocket, (SOCKADDR*)&serveraddr, sizeof(serveraddr)))
 		return false;
 
+	GUID guidDisconnectEx = WSAID_DISCONNECTEX;
+	DWORD bytes = 0;
+	if (SOCKET_ERROR == WSAIoctl(mListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
+		&guidDisconnectEx, sizeof(GUID), &mFnDisconnectEx, sizeof(LPFN_DISCONNECTEX), &bytes, NULL, NULL))
+		return false;
+
+	GUID guidAcceptEx = WSAID_ACCEPTEX;
+	if (SOCKET_ERROR == WSAIoctl(mListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
+		&guidAcceptEx, sizeof(GUID), &mFnAcceptEx, sizeof(LPFN_ACCEPTEX), &bytes, NULL, NULL))
+		return false;
+
+
 	/// RIO function table
 	GUID functionTableId = WSAID_MULTIPLE_RIO;
 	DWORD dwBytes = 0;
@@ -57,16 +97,12 @@ bool RIOManager::Initialize()
 	if ( WSAIoctl(mListenSocket, SIO_GET_MULTIPLE_EXTENSION_FUNCTION_POINTER, &functionTableId, sizeof(GUID), (void**)&mRioFunctionTable, sizeof(mRioFunctionTable), &dwBytes, NULL, NULL) )
 		return false;
 
-	mIocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
-	if (NULL == mIocp)
-		return false;
-	
 	OVERLAPPED overlapped;
 	RIO_NOTIFICATION_COMPLETION completionType;
 
 	completionType.Type = RIO_IOCP_COMPLETION;
 	completionType.Iocp.IocpHandle = mIocp;
-	completionType.Iocp.CompletionKey = (void*)-1;
+	completionType.Iocp.CompletionKey = (void*)CK_RIO;
 	completionType.Iocp.Overlapped = &overlapped;
 
 	mRioCompletionQueue = RIO.RIOCreateCompletionQueue(MAX_CQ_SIZE, &completionType);
@@ -103,29 +139,9 @@ bool RIOManager::StartAcceptLoop()
 	if (SOCKET_ERROR == listen(mListenSocket, SOMAXCONN))
 		return false;
 
-
-	/// accept loop
-	while (true)
+	while (GSessionManager->AcceptSessions())
 	{
-		SOCKET acceptedSock = accept(mListenSocket, NULL, NULL);
-		if (acceptedSock == INVALID_SOCKET)
-		{
-			printf_s("[DEBUG] accept: invalid socket\n");
-			continue;
-		}
-
-		SOCKADDR_IN clientaddr;
-		int addrlen = sizeof(clientaddr);
-		getpeername(acceptedSock, (SOCKADDR*)&clientaddr, &addrlen);
-
-		/// new client session (should not be under any session locks)
-		ClientSession* client = GSessionManager->IssueClientSession();
-
-		/// connection establishing and then issuing recv
-		if (false == client->OnConnect(acceptedSock, &clientaddr))
-		{
-			client->Disconnect(DR_ONCONNECT_ERROR);
-		}
+		Sleep(100);
 	}
 
 	return true;
@@ -143,13 +159,36 @@ unsigned int WINAPI RIOManager::IoWorkerThread(LPVOID lpParam)
 
 	while (true)
 	{
-		int ret = GetQueuedCompletionStatus(hIocp, &numberOfBytes, &completionKey, &pOverlapped, INFINITE);
-		if ( 0 == ret )
+		auto ret = GetQueuedCompletionStatus(hIocp, &numberOfBytes, &completionKey, &pOverlapped, INFINITE);
+		if ( !ret )
 		{
 			printf_s("GetQueuedCompletionStatus Error: %d\n", GetLastError());
 			break;
 		}
 
+		/// For AcceptEx and DisconnectEx
+		if (CK_RIO != completionKey && pOverlapped != nullptr )
+		{
+			OverlappedContext* ovContext = (OverlappedContext*)pOverlapped;
+			if ( IO_ACCEPT == ovContext->mIoType )
+			{
+				ovContext->mClientSession->AcceptCompletion();
+				delete static_cast<OverlappedAcceptContext*>(ovContext);
+			}
+			else if ( IO_DISCONNECT == ovContext->mIoType)
+			{
+				ovContext->mClientSession->DisconnectCompletion(static_cast<OverlappedDisconnectContext*>(ovContext)->mDisconnectReason);
+				delete static_cast<OverlappedDisconnectContext*>(ovContext);
+			}
+			else
+			{
+				CRASH_ASSERT(false);
+			}
+
+			continue;
+		}
+
+		/// For I/O below
 		memset(results, 0, sizeof(results));
 		
 		ULONG numResults = RIO.RIODequeueCompletion(mRioCompletionQueue, results, MAX_RIO_RESULT);
@@ -176,21 +215,21 @@ unsigned int WINAPI RIOManager::IoWorkerThread(LPVOID lpParam)
 		
 			CRASH_ASSERT(context && client);
 
-			
 			if (transferred == 0)
 			{
-				client->Disconnect(DR_ZERO_COMPLETION);
-				ReleaseContext(context);
+				client->DisconnectRequest(DR_ZERO_COMPLETION);
+				ReleaseRioContext(context);
 				continue;
 			}
-			else if (IO_RECV == context->mIoType)
+			
+			if (IO_RECV == context->mIoType)
 			{
 				client->RecvCompletion(transferred);
 
 				/// echo back
 				if (false == client->PostSend())
 				{
-					client->Disconnect(DR_IO_REQUEST_SEND_ERROR);
+					client->DisconnectRequest(DR_IO_REQUEST_SEND_ERROR);
 				}
 		
 			}
@@ -200,11 +239,11 @@ unsigned int WINAPI RIOManager::IoWorkerThread(LPVOID lpParam)
 
 				if (context->Length != transferred)
 				{
-					client->Disconnect(DR_PARTIAL_SEND_COMPLETION);
+					client->DisconnectRequest(DR_PARTIAL_SEND_COMPLETION);
 				}
 				else if (false == client->PostRecv())
 				{
-					client->Disconnect(DR_IO_REQUEST_RECV_ERROR);
+					client->DisconnectRequest(DR_IO_REQUEST_RECV_ERROR);
 				}
 			}
 			else
@@ -213,18 +252,14 @@ unsigned int WINAPI RIOManager::IoWorkerThread(LPVOID lpParam)
 				CRASH_ASSERT(false);
 			}
 
-			ReleaseContext(context);
-		
+			ReleaseRioContext(context);
 		} /// for
-
-	
  	} /// while
-
 	
 	return 0;
 }
 
-void ReleaseContext(RioIoContext* context)
+void ReleaseRioContext(RioIoContext* context)
 {
 	/// refcount release for i/o context
 	context->mClientSession->ReleaseRef();
@@ -232,3 +267,4 @@ void ReleaseContext(RioIoContext* context)
 	/// context release
 	delete context;
 }
+

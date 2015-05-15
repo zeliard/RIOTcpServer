@@ -1,9 +1,7 @@
-﻿High Performance TCP server example using Windows Registered I/O (RIO)
-(for minimizing context-switching & syscall per sec)
+﻿High Performance TCP server example using Windows Registered I/O (RIO) and IO Completion Port
 
+* THIS TEST VERSION WORKS BUT THIS IS NOT TESTED SUFFICIENTLY WELL !!
 
-* TODO
-- Thread local session management
 
 
 
