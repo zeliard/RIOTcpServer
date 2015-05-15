@@ -8,12 +8,11 @@ class SessionManager;
 class ClientSession
 {
 public:
-	ClientSession(int threadId);
+	ClientSession();
 	~ClientSession();
 
 	bool	OnConnect(SOCKET socket, SOCKADDR_IN* addr);
 	bool	IsConnected() const { return mConnected; }
-	int		GetRioThreadId() const { return mRioThreadId; }
 
 
 	bool	PostRecv();
@@ -40,7 +39,6 @@ private:
 
 private:
 	bool			mConnected ;
-	int				mRioThreadId;
 
 	SOCKET			mSocket ;
 	SOCKADDR_IN		mClientAddr ;

@@ -6,9 +6,9 @@
 #include "SessionManager.h"
 
 
-ClientSession::ClientSession(int threadId) 
+ClientSession::ClientSession() 
 : mSocket(NULL), mConnected(false), mRefCount(0)
-	, mCircularBuffer(nullptr), mRioBufferId(NULL), mRioBufferPointer(nullptr), mRioThreadId(threadId)
+	, mCircularBuffer(nullptr), mRioBufferId(NULL), mRioBufferPointer(nullptr)
 {
 	memset(&mClientAddr, 0, sizeof(SOCKADDR_IN));
 }
@@ -53,8 +53,6 @@ bool ClientSession::OnConnect(SOCKET socket, SOCKADDR_IN* addr)
 {
 	FastSpinlockGuard criticalSection(mSessionLock);
 
-	CRASH_ASSERT(LIoThreadId == MAIN_THREAD_ID);
-
 	mSocket = socket;
 
 	/// make socket non-blocking
@@ -68,11 +66,18 @@ bool ClientSession::OnConnect(SOCKET socket, SOCKADDR_IN* addr)
 	/// create socket RQ
 	/// SEND and RECV within one CQ (you can do with two CQs, seperately)
 	mRequestQueue = RIO.RIOCreateRequestQueue(mSocket, MAX_RECV_RQ_SIZE_PER_SOCKET, 1, MAX_SEND_RQ_SIZE_PER_SOCKET, 1,
-		GRioManager->GetCompletionQueue(mRioThreadId), GRioManager->GetCompletionQueue(mRioThreadId), NULL);
+		GRioManager->GetCompletionQueue(), GRioManager->GetCompletionQueue(), NULL);
 	if (mRequestQueue == RIO_INVALID_RQ)
 	{
 		printf_s("[DEBUG] RIOCreateRequestQueue Error: %d\n", GetLastError());
 		return false ;
+	}
+
+	HANDLE handle = CreateIoCompletionPort((HANDLE)mSocket, GRioManager->GetIocp(), (ULONG_PTR)this, 0);
+	if (handle != GRioManager->GetIocp())
+	{
+		printf_s("[DEBUG] CreateIoCompletionPort error: %d\n", GetLastError());
+		return false;
 	}
 
 	memcpy(&mClientAddr, addr, sizeof(SOCKADDR_IN));

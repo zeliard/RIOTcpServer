@@ -7,17 +7,19 @@
 
 
 RIO_EXTENSION_FUNCTION_TABLE RIOManager::mRioFunctionTable = { 0, };
-RIO_CQ RIOManager::mRioCompletionQueue[MAX_RIO_THREAD+1] = { 0, };
+RIO_CQ RIOManager::mRioCompletionQueue(0);
 
 RIOManager* GRioManager = nullptr;
 
-RIOManager::RIOManager() : mListenSocket(NULL)
+RIOManager::RIOManager() : mListenSocket(NULL), mIocp(NULL)
 {
 }
 
 
 RIOManager::~RIOManager()
 {
+	CloseHandle(mIocp);
+
 	/// winsock finalizing
 	WSACleanup();
 }
@@ -55,6 +57,22 @@ bool RIOManager::Initialize()
 	if ( WSAIoctl(mListenSocket, SIO_GET_MULTIPLE_EXTENSION_FUNCTION_POINTER, &functionTableId, sizeof(GUID), (void**)&mRioFunctionTable, sizeof(mRioFunctionTable), &dwBytes, NULL, NULL) )
 		return false;
 
+	mIocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+	if (NULL == mIocp)
+		return false;
+	
+	OVERLAPPED overlapped;
+	RIO_NOTIFICATION_COMPLETION completionType;
+
+	completionType.Type = RIO_IOCP_COMPLETION;
+	completionType.Iocp.IocpHandle = mIocp;
+	completionType.Iocp.CompletionKey = (void*)-1;
+	completionType.Iocp.Overlapped = &overlapped;
+
+	mRioCompletionQueue = RIO.RIOCreateCompletionQueue(MAX_CQ_SIZE, &completionType);
+	if (mRioCompletionQueue == RIO_INVALID_CQ)
+		CRASH_ASSERT(false);
+
 	return true;
 }
 
@@ -62,12 +80,17 @@ bool RIOManager::Initialize()
 bool RIOManager::StartIoThreads()
 {
 	/// I/O Thread
-	for (int i = 0; i < MAX_RIO_THREAD; ++i)
+	DWORD dwThreadId;
+	HANDLE hThread = (HANDLE)_beginthreadex(NULL, 0, IoWorkerThread, (LPVOID)mIocp, 0, (unsigned int*)&dwThreadId);
+	if (hThread == NULL)
+		return false;
+	
+	/// notify completion-ready 
+	INT notifyResult = RIO.RIONotify(mRioCompletionQueue);
+	if (notifyResult != ERROR_SUCCESS)
 	{
-		DWORD dwThreadId;
-		HANDLE hThread = (HANDLE)_beginthreadex(NULL, 0, IoWorkerThread, (LPVOID)(i + 1), 0, (unsigned int*)&dwThreadId);
-		if (hThread == NULL)
-			return false;
+		printf_s("RIONotify Error: %d\n", GetLastError());
+		CRASH_ASSERT(false);
 	}
 
 	return true;
@@ -111,33 +134,37 @@ bool RIOManager::StartAcceptLoop()
 
 unsigned int WINAPI RIOManager::IoWorkerThread(LPVOID lpParam)
 {
-	LIoThreadId = reinterpret_cast<int>(lpParam);
-	
-
-	mRioCompletionQueue[LIoThreadId] = RIO.RIOCreateCompletionQueue(MAX_CQ_SIZE_PER_RIO_THREAD, 0);
-	if (mRioCompletionQueue[LIoThreadId] == RIO_INVALID_CQ)
-	{
-		CRASH_ASSERT(false);
-		return -1;
-	}
-		
+	HANDLE hIocp = lpParam;
+	DWORD numberOfBytes = 0;
+	ULONG_PTR completionKey = 0;
+	OVERLAPPED* pOverlapped = nullptr;
 
 	RIORESULT results[MAX_RIO_RESULT];
 
 	while (true)
 	{
+		int ret = GetQueuedCompletionStatus(hIocp, &numberOfBytes, &completionKey, &pOverlapped, INFINITE);
+		if ( 0 == ret )
+		{
+			printf_s("GetQueuedCompletionStatus Error: %d\n", GetLastError());
+			break;
+		}
+
 		memset(results, 0, sizeof(results));
 		
-		ULONG numResults = RIO.RIODequeueCompletion(mRioCompletionQueue[LIoThreadId], results, MAX_RIO_RESULT);
+		ULONG numResults = RIO.RIODequeueCompletion(mRioCompletionQueue, results, MAX_RIO_RESULT);
 		
-		if (0 == numResults)
+		if (0 == numResults || RIO_CORRUPT_CQ == numResults)
 		{
-			Sleep(1); ///< for low cpu-usage
-			continue;
+			printf_s("RIODequeueCompletion Error: %d\n", GetLastError());
+			CRASH_ASSERT(false);
 		}
-		else if (RIO_CORRUPT_CQ == numResults)
+
+		/// Notify after Dequeueing
+		int notifyResult = RIO.RIONotify(mRioCompletionQueue);
+		if (notifyResult != ERROR_SUCCESS)
 		{
-			printf_s("[DEBUG] RIO CORRUPT CQ \n");
+			printf_s("RIONotify Error: %d\n", GetLastError());
 			CRASH_ASSERT(false);
 		}
 
@@ -152,8 +179,6 @@ unsigned int WINAPI RIOManager::IoWorkerThread(LPVOID lpParam)
 			
 			if (transferred == 0)
 			{
-				CRASH_ASSERT(client->GetRioThreadId() == LIoThreadId);
-
 				client->Disconnect(DR_ZERO_COMPLETION);
 				ReleaseContext(context);
 				continue;

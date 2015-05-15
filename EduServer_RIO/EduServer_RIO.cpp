@@ -8,12 +8,10 @@
 #include "SessionManager.h"
 #include "RIOManager.h"
 
-__declspec(thread) int LIoThreadId = -1;
+
 
 int _tmain(int argc, _TCHAR* argv[])
 {
-	LIoThreadId = MAIN_THREAD_ID;
-
 	/// for dump on crash
 	SetUnhandledExceptionFilter(ExceptionFilter);
 

@@ -13,7 +13,8 @@ public:
 	bool StartIoThreads();
 	bool StartAcceptLoop();
 
-	const RIO_CQ& GetCompletionQueue(int threadId) { return mRioCompletionQueue[threadId]; }
+	const RIO_CQ& GetCompletionQueue() { return mRioCompletionQueue; }
+	HANDLE GetIocp() { return mIocp;  }
 
 public:
 	static RIO_EXTENSION_FUNCTION_TABLE mRioFunctionTable;
@@ -23,9 +24,10 @@ private:
 	
 
 private:
-	static RIO_CQ mRioCompletionQueue[MAX_RIO_THREAD + 1];
+	static RIO_CQ mRioCompletionQueue;
 
 	SOCKET	mListenSocket;
+	HANDLE	mIocp;
 
 };
 

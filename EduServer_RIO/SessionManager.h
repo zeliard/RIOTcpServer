@@ -21,7 +21,7 @@ public:
 
 private:
 	typedef std::list<ClientSession*> ClientList;
-	ClientList	mFreeSessionList[MAX_RIO_THREAD+1];
+	ClientList	mFreeSessionList;
 	ClientList	mOccupiedSessionList;
 
 	FastSpinlock mLock;
